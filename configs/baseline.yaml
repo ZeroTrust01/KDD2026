@@ -1,0 +1,45 @@
+# Baseline experiment configuration
+# KDD Cup 2026 - DIN + DCN V2
+
+data:
+  dataset: "kdd2026"
+  data_dir: "data/KDD_Cup2026/"
+  train_split: 0.8
+  valid_split: 0.1
+  test_split: 0.1
+  max_seq_len: 200              # truncate sequences
+  batch_size: 1024
+  num_workers: 4
+
+model:
+  name: "din_dcnv2"
+  embedding_dim: 64
+  # Feature interaction
+  cross_num_layers: 3           # DCN V2 layers
+  dnn_hidden_units: [512, 256, 128]
+  dnn_dropout: 0.1
+  # Sequence modeling
+  attention_hidden_units: [64, 16]  # DIN attention
+  attention_activation: "dice"
+  # Output
+  output_dim: 1
+
+training:
+  optimizer: "adam"
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  epochs: 20
+  early_stopping_patience: 3
+  lr_scheduler: "cosine"
+  warmup_steps: 1000
+  gradient_clip: 1.0
+
+evaluation:
+  metrics: ["auc", "logloss"]
+  monitor: "auc"
+  monitor_mode: "max"
+
+logging:
+  log_dir: "outputs/baseline"
+  tensorboard: true
+  log_every_n_steps: 100

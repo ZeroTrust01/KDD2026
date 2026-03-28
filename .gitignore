@@ -1,0 +1,78 @@
+# =========================
+# Data files (DO NOT upload)
+# =========================
+/data/
+*.parquet
+*.csv
+*.csv.tar.gz
+*.csv.gz
+*.tsv
+
+# =========================
+# Reference papers (too large)
+# =========================
+Refs/*.pdf
+
+# =========================
+# Model checkpoints & outputs
+# =========================
+checkpoints/
+outputs/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# =========================
+# Jupyter
+# =========================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# =========================
+# IDE & OS
+# =========================
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+
+# =========================
+# Logs & Cache
+# =========================
+logs/
+*.log
+wandb/
+mlruns/
+tensorboard_logs/
+.cache/
+
+# =========================
+# Temporary files
+# =========================
+tmp/
+temp/
