@@ -117,11 +117,11 @@ PROCESSED_DIR = "data/TaobaoAd/processed"
 VOCAB_PATH = os.path.join(PROCESSED_DIR, "feature_vocab.json")
 
 # Configuration - adjust these for your training run
-SAMPLE_USERS = 0        # 0 = ALL users (for full training)
-MAX_BEHAVIOR_ROWS = 0   # 0 = ALL rows (for full training)
+# SAMPLE_USERS = 0        # 0 = ALL users (for full training)
+# MAX_BEHAVIOR_ROWS = 0   # 0 = ALL rows (for full training)
 # For quick test, set:
-# SAMPLE_USERS = 10000
-# MAX_BEHAVIOR_ROWS = 10000000
+SAMPLE_USERS = 10000
+MAX_BEHAVIOR_ROWS = 10000000
 
 if os.path.exists(VOCAB_PATH):
     print("  Preprocessed data already exists, skipping.")
