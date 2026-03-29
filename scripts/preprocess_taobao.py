@@ -45,8 +45,8 @@ NUMERIC_FEATURES = ["price"]
 SEQUENCE_FEATURES = ["cate_seq", "brand_seq"]
 
 
-def load_raw_tables(sample_users=0):
-    """Load the 3 small tables, optionally sample users."""
+def load_raw_sample(sample_users=0):
+    """Load raw_sample.csv, optionally sample users."""
     logger.info("Loading raw_sample.csv ...")
     raw_sample = pd.read_csv(os.path.join(RAW_DIR, "raw_sample.csv"))
     raw_sample.rename(columns={"user": "userid"}, inplace=True)
@@ -61,6 +61,11 @@ def load_raw_tables(sample_users=0):
         raw_sample = raw_sample[raw_sample["userid"].isin(sampled)].reset_index(drop=True)
         logger.info(f"  Sampled to {len(sampled):,} users, {len(raw_sample):,} rows")
 
+    return raw_sample
+
+
+def load_lookup_tables():
+    """Load ad and user lookup tables."""
     logger.info("Loading ad_feature.csv ...")
     ad_feature = pd.read_csv(os.path.join(RAW_DIR, "ad_feature.csv"))
     logger.info(f"  ad_feature: {len(ad_feature):,} rows")
@@ -69,10 +74,10 @@ def load_raw_tables(sample_users=0):
     user_profile = pd.read_csv(os.path.join(RAW_DIR, "user_profile.csv"))
     logger.info(f"  user_profile: {len(user_profile):,} rows")
 
-    return raw_sample, ad_feature, user_profile
+    return ad_feature, user_profile
 
 
-def build_sequences_duckdb(user_ids, max_rows=0, max_len=50):
+def build_sequences_duckdb(user_filter_df, max_rows=0, max_len=50):
     """
     Use DuckDB to build behavior sequences. Disk-spill capable,
     handles 700M+ rows without OOM.
@@ -96,9 +101,8 @@ def build_sequences_duckdb(user_ids, max_rows=0, max_len=50):
     if max_rows == 0:
         con.execute("SET preserve_insertion_order=false")
 
-    # Register user_ids as a table for filtering
-    user_df = pd.DataFrame({"userid": list(user_ids)})
-    con.register("user_filter", user_df)
+    # Register user ids as a table for filtering without materializing a Python set
+    con.register("user_filter", user_filter_df)
 
     # Build the query
     row_limit = f"LIMIT {max_rows}" if max_rows > 0 else ""
@@ -213,6 +217,30 @@ def build_sequences_pandas(user_set, max_rows=0, max_len=50, chunksize=2_000_000
     return seq_df
 
 
+def enrich_split(split_df, ad_feature, user_profile, seq_df):
+    """Join lookup tables and behavior sequences for a single split."""
+    split_df = split_df.merge(ad_feature, on="adgroup_id", how="left")
+    split_df = split_df.merge(user_profile, on="userid", how="left")
+
+    if len(seq_df) > 0:
+        split_df = split_df.merge(seq_df, on="userid", how="left")
+    else:
+        split_df["cate_seq"] = ""
+        split_df["brand_seq"] = ""
+
+    split_df["cate_seq"] = split_df["cate_seq"].fillna("")
+    split_df["brand_seq"] = split_df["brand_seq"].fillna("")
+
+    for col in CATEGORICAL_FEATURES:
+        if col in split_df.columns:
+            split_df[col] = split_df[col].fillna("__MISSING__").astype(str)
+    for col in NUMERIC_FEATURES:
+        if col in split_df.columns:
+            split_df[col] = split_df[col].fillna(0.0).astype(float)
+
+    return split_df
+
+
 def build_vocab(series, min_freq=2, name="unknown"):
     """Build vocabulary from a pandas Series."""
     counter = Counter()
@@ -251,18 +279,7 @@ def main():
     os.makedirs(OUT_DIR, exist_ok=True)
 
     # ─── Step 1: Load tables ───
-    raw_sample, ad_feature, user_profile = load_raw_tables(args.sample_users)
-
-    # ─── Step 2: JOIN tables ───
-    logger.info("Joining tables ...")
-    df = raw_sample.merge(ad_feature, on="adgroup_id", how="left")
-    df = df.merge(user_profile, on="userid", how="left")
-    logger.info(f"  Joined: {len(df):,} rows, {len(df.columns)} cols")
-
-    # ─── Step 3: Build behavior sequences ───
-    user_set = set(df["userid"].unique())
-    num_users = len(user_set)
-    logger.info(f"  Users to process: {num_users:,}")
+    raw_sample = load_raw_sample(args.sample_users)
 
     # Choose backend
     backend = args.backend
@@ -276,10 +293,17 @@ def main():
             logger.info("  Backend: pandas (DuckDB not available)")
 
     if backend == "duckdb":
+        user_filter_df = raw_sample[["userid"]].drop_duplicates().reset_index(drop=True)
+        num_users = len(user_filter_df)
+        logger.info(f"  Users to process: {num_users:,}")
         seq_df = build_sequences_duckdb(
-            user_set, max_rows=args.max_behavior_rows, max_len=args.max_seq_len
+            user_filter_df, max_rows=args.max_behavior_rows, max_len=args.max_seq_len
         )
+        del user_filter_df
     else:
+        user_set = set(raw_sample["userid"].unique())
+        num_users = len(user_set)
+        logger.info(f"  Users to process: {num_users:,}")
         if num_users > 100_000 and args.max_behavior_rows == 0:
             logger.warning("  ⚠️ pandas backend with >100K users and no row limit may OOM!")
             logger.warning("  Consider: pip install duckdb, or --sample_users 100000")
@@ -287,66 +311,77 @@ def main():
             user_set, max_rows=args.max_behavior_rows, max_len=args.max_seq_len
         )
 
-    if len(seq_df) > 0:
-        df = df.merge(seq_df, on="userid", how="left")
-        del seq_df
-    else:
-        df["cate_seq"] = ""
-        df["brand_seq"] = ""
-
-    df["cate_seq"] = df["cate_seq"].fillna("")
-    df["brand_seq"] = df["brand_seq"].fillna("")
-
-    # ─── Step 4: Fill missing + normalize ───
-    for col in CATEGORICAL_FEATURES:
-        if col in df.columns:
-            df[col] = df[col].fillna("__MISSING__").astype(str)
-    for col in NUMERIC_FEATURES:
-        if col in df.columns:
-            df[col] = df[col].fillna(0.0).astype(float)
-
-    if "price" in df.columns:
-        df["price"] = np.log1p(df["price"].clip(lower=0))
-        mu, sigma = df["price"].mean(), df["price"].std()
-        if sigma > 0:
-            df["price"] = (df["price"] - mu) / sigma
-
-    # ─── Step 5: Split by time_stamp (70/15/15) ───
-    logger.info("Splitting by time_stamp ...")
-    df = df.sort_values("time_stamp").reset_index(drop=True)
-    n = len(df)
+    # ─── Step 3: Split raw_sample by time_stamp (70/15/15) ───
+    logger.info("Splitting raw_sample by time_stamp ...")
+    raw_sample = raw_sample.sort_values("time_stamp").reset_index(drop=True)
+    n = len(raw_sample)
     t1, t2 = int(n * 0.7), int(n * 0.85)
 
-    splits = {
-        "train": df.iloc[:t1],
-        "valid": df.iloc[t1:t2],
-        "test": df.iloc[t2:],
+    split_ranges = {
+        "train": (0, t1),
+        "valid": (t1, t2),
+        "test": (t2, n),
     }
-    for k, v in splits.items():
-        logger.info(f"  {k}: {len(v):,} rows, clk_rate={v['clk'].mean():.4f}")
 
-    # ─── Step 6: Build vocab (train only) ───
+    for split_name, (start, end) in split_ranges.items():
+        split_view = raw_sample.iloc[start:end]
+        logger.info(f"  {split_name}: {len(split_view):,} rows, clk_rate={split_view['clk'].mean():.4f}")
+
+    # Load lookup tables only after behavior sequences are built to reduce peak memory.
+    ad_feature, user_profile = load_lookup_tables()
+
+    # ─── Step 4: Process train split first for vocab + normalization stats ───
+    train_start, train_end = split_ranges["train"]
+    train_df = enrich_split(raw_sample.iloc[train_start:train_end].copy(), ad_feature, user_profile, seq_df)
+
+    price_mu = 0.0
+    price_sigma = 0.0
+    if "price" in train_df.columns:
+        train_df["price"] = np.log1p(train_df["price"].clip(lower=0))
+        price_mu = train_df["price"].mean()
+        price_sigma = train_df["price"].std()
+        if price_sigma > 0:
+            train_df["price"] = (train_df["price"] - price_mu) / price_sigma
+
+    # ─── Step 5: Build vocab (train only) ───
     logger.info("Building vocabs ...")
     feature_vocab = {}
     for feat in CATEGORICAL_FEATURES:
-        if feat in splits["train"].columns:
+        if feat in train_df.columns:
             feature_vocab[feat] = build_vocab(
-                splits["train"][feat], min_freq=args.min_freq, name=feat
+                train_df[feat], min_freq=args.min_freq, name=feat
             )
     for feat in SEQUENCE_FEATURES:
-        if feat in splits["train"].columns:
+        if feat in train_df.columns:
             feature_vocab[feat] = build_vocab(
-                splits["train"][feat], min_freq=args.min_freq, name=feat
+                train_df[feat], min_freq=args.min_freq, name=feat
             )
 
-    # ─── Step 7: Save ───
+    # ─── Step 6: Save train/valid/test sequentially to reduce peak memory ───
     keep_cols = ["clk"] + CATEGORICAL_FEATURES + NUMERIC_FEATURES + SEQUENCE_FEATURES
-    keep_cols = [c for c in keep_cols if c in df.columns]
+    keep_cols = [c for c in keep_cols if c in train_df.columns]
 
-    for name, sdf in splits.items():
-        path = os.path.join(OUT_DIR, f"{name}.parquet")
-        sdf[keep_cols].to_parquet(path, index=False)
-        logger.info(f"  Saved {name}: {path}")
+    train_path = os.path.join(OUT_DIR, "train.parquet")
+    train_df[keep_cols].to_parquet(train_path, index=False)
+    logger.info(f"  Saved train: {train_path}")
+    del train_df
+
+    for split_name in ["valid", "test"]:
+        start, end = split_ranges[split_name]
+        split_df = enrich_split(raw_sample.iloc[start:end].copy(), ad_feature, user_profile, seq_df)
+        if "price" in split_df.columns:
+            split_df["price"] = np.log1p(split_df["price"].clip(lower=0))
+            if price_sigma > 0:
+                split_df["price"] = (split_df["price"] - price_mu) / price_sigma
+        path = os.path.join(OUT_DIR, f"{split_name}.parquet")
+        split_df[keep_cols].to_parquet(path, index=False)
+        logger.info(f"  Saved {split_name}: {path}")
+        del split_df
+
+    del raw_sample
+    del ad_feature
+    del user_profile
+    del seq_df
 
     vocab_path = os.path.join(OUT_DIR, "feature_vocab.json")
     with open(vocab_path, "w") as f:
