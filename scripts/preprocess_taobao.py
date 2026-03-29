@@ -69,64 +69,72 @@ def load_raw_tables(sample_users=0):
     return raw_sample, ad_feature, user_profile
 
 
-def load_behavior_log_fast(user_set, max_rows=0, chunksize=2_000_000):
+def load_behavior_and_build_sequences(user_set, max_rows=0, max_len=50, chunksize=2_000_000):
     """
-    Load behavior_log.csv using vectorized pandas ops (much faster than iterrows).
-    Returns df with columns: user, time_stamp, cate, brand
+    Stream behavior_log.csv in chunks; build per-user sequences incrementally.
+    Never holds the full behavior log in memory.
+
+    Returns: DataFrame with columns [userid, cate_seq, brand_seq]
     """
     behavior_path = os.path.join(RAW_DIR, "behavior_log.csv")
-    logger.info(f"Loading behavior_log.csv (max_rows={max_rows or 'ALL'}) ...")
+    logger.info(f"Loading behavior_log.csv (max_rows={max_rows or 'ALL'}) + building sequences ...")
 
-    chunks = []
+    # Dict to accumulate per-user sequences: {user_id: [(time_stamp, cate, brand), ...]}
+    user_sequences = {}
     total_read = 0
+    total_kept = 0
 
     reader = pd.read_csv(behavior_path, chunksize=chunksize)
     for i, chunk in enumerate(reader):
         total_read += len(chunk)
 
-        # Vectorized filter — MUCH faster than iterrows
+        # Vectorized filter — only keep users in user_set
         filtered = chunk[chunk["user"].isin(user_set)][["user", "time_stamp", "cate", "brand"]]
-        if len(filtered) > 0:
-            chunks.append(filtered)
+        total_kept += len(filtered)
+
+        # Accumulate into per-user lists (keep only last max_len*2 to bound memory)
+        for user_id, time_stamp, cate, brand in zip(
+            filtered["user"].values,
+            filtered["time_stamp"].values,
+            filtered["cate"].values,
+            filtered["brand"].values,
+        ):
+            if user_id not in user_sequences:
+                user_sequences[user_id] = []
+            user_sequences[user_id].append((time_stamp, str(cate), str(brand)))
+
+            # Periodic trim to prevent unbounded growth
+            if len(user_sequences[user_id]) > max_len * 4:
+                user_sequences[user_id].sort(key=lambda x: x[0])
+                user_sequences[user_id] = user_sequences[user_id][-max_len:]
 
         if (i + 1) % 5 == 0:
-            kept = sum(len(c) for c in chunks)
-            logger.info(f"  ... read {total_read:,} rows, kept {kept:,}")
+            logger.info(f"  ... read {total_read:,} rows, kept {total_kept:,}, users_with_seq={len(user_sequences):,}")
 
         if max_rows > 0 and total_read >= max_rows:
             logger.info(f"  Reached max_rows={max_rows:,}, stopping.")
             break
 
-    if not chunks:
+    logger.info(f"  Done: {total_read:,} rows read, {total_kept:,} kept, {len(user_sequences):,} users with sequences")
+
+    # Build final sequences
+    logger.info(f"Building final sequences (max_len={max_len}) ...")
+    records = []
+    for user_id, items in user_sequences.items():
+        items.sort(key=lambda x: x[0])
+        recent = items[-max_len:]
+        cate_seq = "^".join(x[1] for x in recent)
+        brand_seq = "^".join(x[2] for x in recent)
+        records.append({"userid": user_id, "cate_seq": cate_seq, "brand_seq": brand_seq})
+
+    # Free memory
+    del user_sequences
+
+    if not records:
         logger.warning("  No behavior data found for selected users!")
-        return pd.DataFrame(columns=["user", "time_stamp", "cate", "brand"])
+        return pd.DataFrame(columns=["userid", "cate_seq", "brand_seq"])
 
-    behavior_df = pd.concat(chunks, ignore_index=True)
-    logger.info(f"  Done: {total_read:,} rows read, {len(behavior_df):,} kept")
-    return behavior_df
-
-
-def build_sequences(behavior_df, max_len=50):
-    """
-    Build per-user behavior sequences using vectorized groupby.
-    Returns: DataFrame with columns [userid, cate_seq, brand_seq]
-    """
-    logger.info(f"Building behavior sequences (max_len={max_len}) ...")
-
-    behavior_df = behavior_df.sort_values(["user", "time_stamp"])
-    behavior_df["cate"] = behavior_df["cate"].astype(str)
-    behavior_df["brand"] = behavior_df["brand"].astype(str)
-
-    # Group by user, take last max_len items, join with ^
-    def agg_seq(group):
-        recent = group.tail(max_len)
-        return pd.Series({
-            "cate_seq": "^".join(recent["cate"].values),
-            "brand_seq": "^".join(recent["brand"].values),
-        })
-
-    seq_df = behavior_df.groupby("user").apply(agg_seq).reset_index()
-    seq_df.rename(columns={"user": "userid"}, inplace=True)
+    seq_df = pd.DataFrame(records)
     logger.info(f"  Built sequences for {len(seq_df):,} users")
     return seq_df
 
@@ -174,13 +182,15 @@ def main():
     df = df.merge(user_profile, on="userid", how="left")
     logger.info(f"  Joined: {len(df):,} rows, {len(df.columns)} cols")
 
-    # ─── Step 3: Load behavior log + build sequences ───
+    # ─── Step 3: Load behavior log + build sequences (streaming) ───
     user_set = set(df["userid"].unique())
-    behavior_df = load_behavior_log_fast(user_set, max_rows=args.max_behavior_rows)
+    seq_df = load_behavior_and_build_sequences(
+        user_set, max_rows=args.max_behavior_rows, max_len=args.max_seq_len
+    )
 
-    if len(behavior_df) > 0:
-        seq_df = build_sequences(behavior_df, max_len=args.max_seq_len)
+    if len(seq_df) > 0:
         df = df.merge(seq_df, on="userid", how="left")
+        del seq_df  # free memory
     else:
         df["cate_seq"] = ""
         df["brand_seq"] = ""
