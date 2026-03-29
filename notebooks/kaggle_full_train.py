@@ -117,7 +117,9 @@ else:
     cmd = [sys.executable, "scripts/preprocess_taobao.py",
            "--sample_users", "0",
            "--max_behavior_rows", "0",
-           "--backend", "duckdb"]
+           "--backend", "duckdb",
+           "--duckdb_memory_limit", "8GB",
+           "--duckdb_num_shards", "12"]
     print(f"  Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 

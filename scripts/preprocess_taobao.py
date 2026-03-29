@@ -16,6 +16,7 @@ import sys
 import json
 import logging
 import argparse
+import math
 from collections import Counter
 
 import numpy as np
@@ -77,36 +78,18 @@ def load_lookup_tables():
     return ad_feature, user_profile
 
 
-def build_sequences_duckdb(user_filter_df, max_rows=0, max_len=50):
-    """
-    Use DuckDB to build behavior sequences. Disk-spill capable,
-    handles 700M+ rows without OOM.
-
-    Returns: pd.DataFrame with columns [userid, cate_seq, brand_seq]
-    """
-    import duckdb
-
-    behavior_path = os.path.join(RAW_DIR, "behavior_log.csv")
-    logger.info(f"Building behavior sequences with DuckDB (max_len={max_len}) ...")
-
-    con = duckdb.connect()
-
-    # Configure DuckDB for memory-constrained environment
-    # Use temp directory for spilling
-    tmp_dir = os.path.join(OUT_DIR, "_duckdb_tmp")
-    os.makedirs(tmp_dir, exist_ok=True)
+def _duckdb_settings(con, tmp_dir, memory_limit, max_rows):
+    """Apply shared DuckDB settings for constrained environments."""
     con.execute(f"PRAGMA temp_directory='{tmp_dir}'")
-    con.execute("PRAGMA memory_limit='8GB'")
-    con.execute("PRAGMA threads=2")
+    con.execute(f"PRAGMA memory_limit='{memory_limit}'")
+    con.execute("PRAGMA threads=1")
     if max_rows == 0:
         con.execute("SET preserve_insertion_order=false")
 
-    # Register user ids as a table for filtering without materializing a Python set
-    con.register("user_filter", user_filter_df)
 
-    # Build the query
+def _run_duckdb_sequence_query(con, behavior_path, max_rows, max_len):
+    """Build per-user sequences for the registered user_filter table."""
     row_limit = f"LIMIT {max_rows}" if max_rows > 0 else ""
-
     query = f"""
     WITH behavior AS (
         SELECT
@@ -145,18 +128,66 @@ def build_sequences_duckdb(user_filter_df, max_rows=0, max_len=50):
         array_to_string(list_transform(items, x -> x.brand), '^') AS brand_seq
     FROM recent
     """
+    return query
 
-    logger.info("  Executing DuckDB query (this may take 10-30 min for full data) ...")
-    seq_df = con.execute(query).fetchdf()
 
-    con.close()
+def build_sequences_duckdb(user_filter_df, max_rows=0, max_len=50,
+                           memory_limit="24GB", num_shards=0):
+    """
+    Use DuckDB to build behavior sequences in user shards.
+    Writes intermediate parquet shards to disk to keep memory bounded.
+
+    Returns: directory containing parquet shards with columns
+    [userid, cate_seq, brand_seq]
+    """
+    import duckdb
+    import shutil
+
+    behavior_path = os.path.join(RAW_DIR, "behavior_log.csv")
+    logger.info(f"Building behavior sequences with DuckDB (max_len={max_len}) ...")
+    tmp_dir = os.path.join(OUT_DIR, "_duckdb_tmp")
+    seq_dir = os.path.join(OUT_DIR, "_seq_shards")
+    os.makedirs(tmp_dir, exist_ok=True)
+    shutil.rmtree(seq_dir, ignore_errors=True)
+    os.makedirs(seq_dir, exist_ok=True)
+
+    num_users = len(user_filter_df)
+    if num_shards <= 0:
+        num_shards = max(1, min(32, math.ceil(num_users / 100_000)))
+    logger.info(f"  DuckDB shards: {num_shards} (memory_limit={memory_limit})")
+
+    shard_ids = (
+        pd.util.hash_pandas_object(user_filter_df["userid"], index=False)
+        .to_numpy(dtype="uint64") % np.uint64(num_shards)
+    )
+    user_filter_df = user_filter_df.copy()
+    user_filter_df["shard_id"] = shard_ids.astype("int64")
+
+    shard_files = []
+    for shard_id in range(num_shards):
+        shard_users = user_filter_df[user_filter_df["shard_id"] == shard_id][["userid"]]
+        if shard_users.empty:
+            continue
+
+        shard_path = os.path.join(seq_dir, f"seq_shard_{shard_id:03d}.parquet")
+        logger.info(
+            f"  Shard {shard_id + 1}/{num_shards}: {len(shard_users):,} users"
+        )
+
+        con = duckdb.connect()
+        _duckdb_settings(con, tmp_dir, memory_limit, max_rows)
+        con.register("user_filter", shard_users)
+        query = _run_duckdb_sequence_query(con, behavior_path, max_rows, max_len)
+        logger.info("    Executing DuckDB shard query ...")
+        con.execute(f"COPY ({query}) TO '{shard_path}' (FORMAT PARQUET)")
+        con.close()
+
+        shard_files.append(shard_path)
 
     # Cleanup temp dir
-    import shutil
     shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    logger.info(f"  Built sequences for {len(seq_df):,} users")
-    return seq_df
+    logger.info(f"  Built sequence shards: {len(shard_files)} files")
+    return seq_dir
 
 
 def build_sequences_pandas(user_set, max_rows=0, max_len=50, chunksize=2_000_000):
@@ -217,6 +248,32 @@ def build_sequences_pandas(user_set, max_rows=0, max_len=50, chunksize=2_000_000
     return seq_df
 
 
+def load_sequence_shards(seq_dir, user_filter_df, memory_limit="24GB"):
+    """Load only the sequence rows needed for the provided users."""
+    import duckdb
+
+    shard_pattern = os.path.join(seq_dir, "*.parquet")
+    if not os.path.exists(seq_dir):
+        return pd.DataFrame(columns=["userid", "cate_seq", "brand_seq"])
+
+    con = duckdb.connect()
+    tmp_dir = os.path.join(OUT_DIR, "_duckdb_tmp_join")
+    os.makedirs(tmp_dir, exist_ok=True)
+    _duckdb_settings(con, tmp_dir, memory_limit, max_rows=1)
+    con.register("user_filter", user_filter_df)
+    query = f"""
+    SELECT s.userid, s.cate_seq, s.brand_seq
+    FROM read_parquet('{shard_pattern}') s
+    INNER JOIN user_filter u ON s.userid = u.userid
+    """
+    seq_df = con.execute(query).fetchdf()
+    con.close()
+
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return seq_df
+
+
 def enrich_split(split_df, ad_feature, user_profile, seq_df):
     """Join lookup tables and behavior sequences for a single split."""
     split_df = split_df.merge(ad_feature, on="adgroup_id", how="left")
@@ -274,6 +331,10 @@ def main():
     parser.add_argument("--backend", type=str, default="auto",
                         choices=["auto", "duckdb", "pandas"],
                         help="Backend for behavior_log processing")
+    parser.add_argument("--duckdb_memory_limit", type=str, default="24GB",
+                        help="DuckDB memory_limit, e.g. 24GB")
+    parser.add_argument("--duckdb_num_shards", type=int, default=0,
+                        help="Number of DuckDB user shards. 0=auto")
     args = parser.parse_args()
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -296,8 +357,12 @@ def main():
         user_filter_df = raw_sample[["userid"]].drop_duplicates().reset_index(drop=True)
         num_users = len(user_filter_df)
         logger.info(f"  Users to process: {num_users:,}")
-        seq_df = build_sequences_duckdb(
-            user_filter_df, max_rows=args.max_behavior_rows, max_len=args.max_seq_len
+        seq_source = build_sequences_duckdb(
+            user_filter_df,
+            max_rows=args.max_behavior_rows,
+            max_len=args.max_seq_len,
+            memory_limit=args.duckdb_memory_limit,
+            num_shards=args.duckdb_num_shards,
         )
         del user_filter_df
     else:
@@ -332,7 +397,17 @@ def main():
 
     # ─── Step 4: Process train split first for vocab + normalization stats ───
     train_start, train_end = split_ranges["train"]
-    train_df = enrich_split(raw_sample.iloc[train_start:train_end].copy(), ad_feature, user_profile, seq_df)
+    train_slice = raw_sample.iloc[train_start:train_end].copy()
+    if backend == "duckdb":
+        train_user_filter = train_slice[["userid"]].drop_duplicates().reset_index(drop=True)
+        train_seq_df = load_sequence_shards(
+            seq_source, train_user_filter, memory_limit=args.duckdb_memory_limit
+        )
+        del train_user_filter
+    else:
+        train_seq_df = seq_df
+    train_df = enrich_split(train_slice, ad_feature, user_profile, train_seq_df)
+    del train_seq_df
 
     price_mu = 0.0
     price_sigma = 0.0
@@ -368,7 +443,17 @@ def main():
 
     for split_name in ["valid", "test"]:
         start, end = split_ranges[split_name]
-        split_df = enrich_split(raw_sample.iloc[start:end].copy(), ad_feature, user_profile, seq_df)
+        split_slice = raw_sample.iloc[start:end].copy()
+        if backend == "duckdb":
+            split_user_filter = split_slice[["userid"]].drop_duplicates().reset_index(drop=True)
+            split_seq_df = load_sequence_shards(
+                seq_source, split_user_filter, memory_limit=args.duckdb_memory_limit
+            )
+            del split_user_filter
+        else:
+            split_seq_df = seq_df
+        split_df = enrich_split(split_slice, ad_feature, user_profile, split_seq_df)
+        del split_seq_df
         if "price" in split_df.columns:
             split_df["price"] = np.log1p(split_df["price"].clip(lower=0))
             if price_sigma > 0:
@@ -381,7 +466,11 @@ def main():
     del raw_sample
     del ad_feature
     del user_profile
-    del seq_df
+    if backend == "duckdb":
+        import shutil
+        shutil.rmtree(seq_source, ignore_errors=True)
+    else:
+        del seq_df
 
     vocab_path = os.path.join(OUT_DIR, "feature_vocab.json")
     with open(vocab_path, "w") as f:
