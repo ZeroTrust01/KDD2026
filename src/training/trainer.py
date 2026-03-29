@@ -28,7 +28,7 @@ class Trainer:
         )
 
         # Loss
-        self.criterion = nn.BCELoss()
+        self.criterion = nn.BCEWithLogitsLoss()
 
         # LR scheduler
         self.scheduler = None
@@ -55,8 +55,8 @@ class Trainer:
 
             # Forward
             output = self.model(batch)
-            y_pred = output["y_pred"].squeeze(-1)
-            loss = self.criterion(y_pred, labels)
+            logits = output["logits"].squeeze(-1)
+            loss = self.criterion(logits, labels)
 
             # Backward
             self.optimizer.zero_grad()
@@ -84,7 +84,8 @@ class Trainer:
             batch = {k: v.to(self.device) for k, v in batch.items()}
             labels = batch.pop("label").float()
             output = self.model(batch)
-            y_pred = output["y_pred"].squeeze(-1)
+            logits = output["logits"].squeeze(-1)
+            y_pred = torch.sigmoid(logits)
 
             all_preds.extend(y_pred.cpu().numpy().tolist())
             all_labels.extend(labels.cpu().numpy().tolist())

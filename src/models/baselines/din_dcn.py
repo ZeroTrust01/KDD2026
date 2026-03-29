@@ -74,14 +74,15 @@ class DIN_DCN(nn.Module):
         # --- Output layer ---
         final_dim = input_dim + dnn_hidden[-1]  # cross_out + dnn_out
         self.fc = nn.Linear(final_dim, 1)
-        self.output_activation = nn.Sigmoid()
 
     def forward(self, inputs):
         """
         Args:
             inputs: dict of {feature_name: tensor}
         Returns:
-            dict with 'y_pred': [B, 1] predicted probabilities
+            dict with:
+                - 'logits': [B, 1] raw prediction scores
+                - 'y_pred': [B, 1] predicted probabilities
         """
         # 1. Get all embeddings
         emb_dict = self.embedding(inputs)
@@ -107,8 +108,9 @@ class DIN_DCN(nn.Module):
         combined = torch.cat([cross_out, dnn_out], dim=-1)
 
         # 5. Output
-        y_pred = self.output_activation(self.fc(combined))  # [B, 1]
-        return {"y_pred": y_pred}
+        logits = self.fc(combined)  # [B, 1]
+        y_pred = torch.sigmoid(logits)
+        return {"logits": logits, "y_pred": y_pred}
 
     def _flatten_emb_dict(self, emb_dict):
         """Concatenate all embeddings in feature_config order."""
