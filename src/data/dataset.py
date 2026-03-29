@@ -128,6 +128,7 @@ def create_dataloaders(data_dir, feature_vocab, batch_size=1024,
     for split in ["train", "valid", "test"]:
         path = os.path.join(data_dir, f"{split}.parquet")
         if not os.path.exists(path):
+            # Also check if it's a directory of parquet shards
             logger.warning(f"{path} not found, skipping {split}")
             continue
         ds = TaobaoAdDataset(path, feature_vocab, max_seq_len=max_seq_len)

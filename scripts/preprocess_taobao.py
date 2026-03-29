@@ -321,6 +321,30 @@ def build_vocab(series, min_freq=2, name="unknown"):
     return vocab
 
 
+def save_parquet_shards(df, path, rows_per_shard=1_000_000):
+    """Save a DataFrame as a directory of parquet shards."""
+    import shutil
+
+    if os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.exists(path):
+        os.remove(path)
+    os.makedirs(path, exist_ok=True)
+
+    num_rows = len(df)
+    num_shards = max(1, math.ceil(num_rows / rows_per_shard))
+    logger.info(
+        f"  Saving {num_rows:,} rows to {path} in {num_shards} parquet shard(s) "
+        f"(rows_per_shard={rows_per_shard:,})"
+    )
+
+    for shard_idx, start in enumerate(range(0, num_rows, rows_per_shard)):
+        end = min(start + rows_per_shard, num_rows)
+        shard_path = os.path.join(path, f"part-{shard_idx:05d}.parquet")
+        df.iloc[start:end].to_parquet(shard_path, index=False)
+        logger.info(f"    shard {shard_idx + 1}/{num_shards}: rows {start:,}..{end - 1:,}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample_users", type=int, default=1000)
@@ -335,6 +359,8 @@ def main():
                         help="DuckDB memory_limit, e.g. 24GB")
     parser.add_argument("--duckdb_num_shards", type=int, default=0,
                         help="Number of DuckDB user shards. 0=auto")
+    parser.add_argument("--parquet_shard_rows", type=int, default=1_000_000,
+                        help="Rows per output parquet shard")
     args = parser.parse_args()
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -437,8 +463,10 @@ def main():
     keep_cols = [c for c in keep_cols if c in train_df.columns]
 
     train_path = os.path.join(OUT_DIR, "train.parquet")
-    train_df[keep_cols].to_parquet(train_path, index=False)
-    logger.info(f"  Saved train: {train_path}")
+    save_parquet_shards(
+        train_df[keep_cols], train_path, rows_per_shard=args.parquet_shard_rows
+    )
+    logger.info(f"  Saved train dataset: {train_path}")
     del train_df
 
     for split_name in ["valid", "test"]:
@@ -459,8 +487,10 @@ def main():
             if price_sigma > 0:
                 split_df["price"] = (split_df["price"] - price_mu) / price_sigma
         path = os.path.join(OUT_DIR, f"{split_name}.parquet")
-        split_df[keep_cols].to_parquet(path, index=False)
-        logger.info(f"  Saved {split_name}: {path}")
+        save_parquet_shards(
+            split_df[keep_cols], path, rows_per_shard=args.parquet_shard_rows
+        )
+        logger.info(f"  Saved {split_name} dataset: {path}")
         del split_df
 
     del raw_sample

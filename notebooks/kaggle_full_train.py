@@ -138,9 +138,21 @@ for fname in ["train.parquet", "valid.parquet", "test.parquet", "feature_vocab.j
     src = os.path.join(PROCESSED_DIR, fname)
     dst = os.path.join(OUTPUT_DIR, fname)
     if os.path.exists(src):
-        shutil.copy(src, dst)
-        size = os.path.getsize(src)
-        print(f"  Copied {fname} to output ({size / 1e6:.1f} MB)")
+        if os.path.isdir(dst):
+            shutil.rmtree(dst, ignore_errors=True)
+        elif os.path.exists(dst):
+            os.remove(dst)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            total_size = 0
+            for root, _, files in os.walk(src):
+                for file_name in files:
+                    total_size += os.path.getsize(os.path.join(root, file_name))
+            print(f"  Copied {fname} dataset to output ({total_size / 1e6:.1f} MB)")
+        else:
+            shutil.copy(src, dst)
+            size = os.path.getsize(src)
+            print(f"  Copied {fname} to output ({size / 1e6:.1f} MB)")
 
 
 # ─── Step 3: Train ───
