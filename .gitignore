@@ -2,6 +2,11 @@
 # Data files (DO NOT upload)
 # =========================
 /data/
+
+# =========================
+# Reference code (DO NOT upload)
+# =========================
+/reference/
 *.parquet
 *.csv
 *.csv.tar.gz
