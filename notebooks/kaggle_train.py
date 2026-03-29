@@ -1,27 +1,20 @@
 """
 KDD Cup 2026 - DIN + DCN V2 Baseline Training on Kaggle
 ========================================================
-Kaggle Notebook 训练脚本
+使用预处理好的数据直接训练
 
-使用方法:
-1. 在 Kaggle 上创建 Dataset，上传以下文件:
-   - data/TaobaoAd/raw_sample.csv.tar.gz
-   - data/TaobaoAd/ad_feature.csv.tar.gz
-   - data/TaobaoAd/user_profile.csv.tar.gz
-   - data/TaobaoAd/behavior_log.csv.tar.gz
-
-2. 创建 Kaggle Notebook，选择 GPU T4 x2
-3. 添加上面创建的 Dataset
-4. 复制本脚本到 Notebook cell 中运行
-
-注意: Kaggle 有 30h/周 GPU 限额
+前置步骤:
+1. 创建 Kaggle Notebook, 选择 GPU T4 x2, Internet ON
+2. Add data: 搜索 "taobao-ad-processed" 并添加
+3. 在 Cell 中运行本脚本
 """
 
 import os
 import sys
 import subprocess
+import shutil
 
-# ─── Step 0: Clone code from GitHub ───
+# ─── Step 0: Clone code ───
 print("=" * 60)
 print("Step 0: Cloning code from GitHub ...")
 print("=" * 60)
@@ -33,175 +26,87 @@ if not os.path.exists("/kaggle/working/KDD2026"):
 os.chdir("/kaggle/working/KDD2026")
 sys.path.insert(0, "/kaggle/working/KDD2026")
 
-# ─── Step 1: Locate and extract data ───
+# ─── Step 1: Link preprocessed data ───
 print("\n" + "=" * 60)
-print("Step 1: Locating and extracting data ...")
+print("Step 1: Linking preprocessed data ...")
 print("=" * 60)
 
 import glob
-import tarfile
-import shutil
 
 KAGGLE_INPUT = "/kaggle/input"
-DATA_DIR = "data/TaobaoAd"
-os.makedirs(DATA_DIR, exist_ok=True)
+PROCESSED_DIR = "data/TaobaoAd/processed"
+os.makedirs(PROCESSED_DIR, exist_ok=True)
 
-EXPECTED_CSVS = ["raw_sample.csv", "ad_feature.csv", "user_profile.csv", "behavior_log.csv"]
+# Find and link preprocessed files
+EXPECTED_FILES = ["train.parquet", "valid.parquet", "test.parquet", "feature_vocab.json"]
+found_count = 0
 
-# --- Strategy 1: Extract tar.gz files ---
-tar_files = glob.glob(f"{KAGGLE_INPUT}/**/*.tar.gz", recursive=True)
-if tar_files:
-    print(f"Found {len(tar_files)} tar.gz files:")
-    for f in tar_files:
-        size = os.path.getsize(f)
-        print(f"  {f} ({size / 1e6:.1f} MB)" if size < 1e9 else f"  {f} ({size / 1e9:.1f} GB)")
+for fname in EXPECTED_FILES:
+    target = os.path.join(PROCESSED_DIR, fname)
+    if os.path.exists(target):
+        print(f"  ✓ {fname} already exists")
+        found_count += 1
+        continue
 
-    # Extract to a temp dir first, then move CSV files
-    extract_tmp = "data/TaobaoAd/_extract_tmp"
-    os.makedirs(extract_tmp, exist_ok=True)
-
-    for tar_path in tar_files:
-        fname = os.path.basename(tar_path)
-        print(f"  Extracting {fname} ...")
-        with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=extract_tmp)
-
-    # Find actual CSV files recursively and move to DATA_DIR
-    for csv_file in glob.glob(f"{extract_tmp}/**/*.csv", recursive=True):
-        csv_name = os.path.basename(csv_file)
-        target = os.path.join(DATA_DIR, csv_name)
-        if not os.path.isfile(target):
-            shutil.move(csv_file, target)
-            print(f"  ✓ Moved {csv_name}")
-
-    # Cleanup temp dir
-    shutil.rmtree(extract_tmp, ignore_errors=True)
-
-# --- Strategy 2: Find CSV files directly in Kaggle input ---
-for csv_path in glob.glob(f"{KAGGLE_INPUT}/**/*.csv", recursive=True):
-    csv_name = os.path.basename(csv_path)
-    target = os.path.join(DATA_DIR, csv_name)
-    if not os.path.isfile(target):
-        os.symlink(csv_path, target)
-        print(f"  ✓ Linked {csv_name}")
-
-# --- Strategy 3: Handle case where extraction created directories ---
-for item in os.listdir(DATA_DIR):
-    item_path = os.path.join(DATA_DIR, item)
-    if os.path.isdir(item_path) and item.endswith(".csv"):
-        # Directory named like "raw_sample.csv/" - search inside for actual CSV
-        for f in glob.glob(f"{item_path}/**/*.csv", recursive=True):
-            real_name = os.path.basename(f)
-            target = os.path.join(DATA_DIR, real_name)
-            if not os.path.isfile(target):
-                shutil.move(f, target)
-                print(f"  ✓ Rescued {real_name} from directory")
-        shutil.rmtree(item_path, ignore_errors=True)
-
-# --- Verify ---
-print("\nData files:")
-found = []
-for csv_name in EXPECTED_CSVS:
-    fpath = os.path.join(DATA_DIR, csv_name)
-    if os.path.isfile(fpath):
-        size = os.path.getsize(fpath)
-        label = f"{size / 1e6:.1f} MB" if size < 1e9 else f"{size / 1e9:.1f} GB"
-        print(f"  ✓ {csv_name}: {label}")
-        found.append(csv_name)
+    # Search in all Kaggle input directories
+    matches = glob.glob(f"{KAGGLE_INPUT}/**/{fname}", recursive=True)
+    if matches:
+        src = matches[0]
+        shutil.copy(src, target)  # copy instead of symlink for reliability
+        print(f"  ✓ {fname} copied from {src}")
+        found_count += 1
     else:
-        print(f"  ✗ {csv_name}: NOT FOUND")
+        print(f"  ✗ {fname} NOT FOUND")
 
-if len(found) < 4:
-    print("\n⚠️  Missing data files! Listing all in Kaggle input:")
+if found_count < 4:
+    print("\n⚠️  Missing files! Available in Kaggle input:")
     for f in glob.glob(f"{KAGGLE_INPUT}/**/*", recursive=True):
         if os.path.isfile(f):
             print(f"    {f}")
+    raise FileNotFoundError("Missing preprocessed data files. Did you add the dataset?")
 
+print(f"\n  All {found_count} files ready!")
 
-# ─── Step 2: Install dependencies ───
+# ─── Step 2: Check dependencies ───
 print("\n" + "=" * 60)
 print("Step 2: Checking dependencies ...")
 print("=" * 60)
 
-try:
-    import torch
-    import sklearn
-    import yaml
-    import tqdm
-    print(f"  PyTorch: {torch.__version__}")
-    print(f"  CUDA available: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"  GPU: {torch.cuda.get_device_name(0)}")
-    print("  All dependencies OK")
-except ImportError as e:
-    print(f"  Missing: {e}")
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                    "torch", "scikit-learn", "pyyaml", "tqdm"], check=True)
-
-
-# ─── Step 3: Preprocess data ───
-print("\n" + "=" * 60)
-print("Step 3: Preprocessing data ...")
-print("=" * 60)
-
-PROCESSED_DIR = "data/TaobaoAd/processed"
-VOCAB_PATH = os.path.join(PROCESSED_DIR, "feature_vocab.json")
-
-# Configuration - adjust these for your training run
-# SAMPLE_USERS = 0        # 0 = ALL users (for full training)
-# MAX_BEHAVIOR_ROWS = 0   # 0 = ALL rows (for full training)
-# For quick test, set:
-SAMPLE_USERS = 10000
-MAX_BEHAVIOR_ROWS = 10000000
-
-if os.path.exists(VOCAB_PATH):
-    print("  Preprocessed data already exists, skipping.")
-else:
-    cmd = [
-        sys.executable, "scripts/preprocess_taobao.py",
-        "--sample_users", str(SAMPLE_USERS),
-        "--max_behavior_rows", str(MAX_BEHAVIOR_ROWS),
-    ]
-    print(f"  Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-
-# Show preprocessed data stats
-import json
-with open(VOCAB_PATH) as f:
-    vocab = json.load(f)
-print(f"\n  Vocab stats:")
-for feat, v in vocab.items():
-    print(f"    {feat}: {len(v)} tokens")
-
-
-# ─── Step 4: Train ───
-print("\n" + "=" * 60)
-print("Step 4: Training DIN + DCN V2 ...")
-print("=" * 60)
-
 import torch
-import yaml
+print(f"  PyTorch: {torch.__version__}")
+print(f"  CUDA: {torch.cuda.is_available()}")
+if torch.cuda.is_available():
+    for i in range(torch.cuda.device_count()):
+        print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+
+try:
+    import yaml, sklearn, tqdm as _tqdm
+    print("  All dependencies OK")
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                    "pyyaml", "scikit-learn", "tqdm"], check=True)
+
+# ─── Step 3: Train ───
+print("\n" + "=" * 60)
+print("Step 3: Training DIN + DCN V2 ...")
+print("=" * 60)
+
 import json
+import yaml
 import numpy as np
 import random
 import logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
 logger = logging.getLogger(__name__)
 
 from src.data.dataset import create_dataloaders, get_feature_config
 from src.models.baselines.din_dcn import DIN_DCN
 from src.training.trainer import Trainer
 
-# Set seed
+# Seed
 SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
+random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
 if torch.cuda.is_available():
     torch.cuda.manual_seed_all(SEED)
 
@@ -209,13 +114,13 @@ if torch.cuda.is_available():
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(f"  Device: {device}")
 
-# Load config
+# Config
 with open("configs/baseline.yaml") as f:
     config = yaml.safe_load(f)
 
-# Override config for Kaggle (stronger training)
-config["data"]["num_workers"] = 2  # Kaggle has limited CPU cores
-config["data"]["batch_size"] = 2048  # Larger batch with GPU
+# Kaggle overrides
+config["data"]["num_workers"] = 2
+config["data"]["batch_size"] = 2048
 config["training"]["epochs"] = 15
 config["training"]["early_stopping_patience"] = 4
 
@@ -223,25 +128,27 @@ data_cfg = config["data"]
 model_cfg = config["model"]
 train_cfg = config["training"]
 
-# Load vocab
+# Vocab
+VOCAB_PATH = os.path.join(PROCESSED_DIR, "feature_vocab.json")
 with open(VOCAB_PATH) as f:
     feature_vocab = json.load(f)
+
+print(f"  Vocab features: {len(feature_vocab)}")
 
 # DataLoaders
 max_seq_len = data_cfg.get("max_seq_len", 50)
 loaders = create_dataloaders(
-    data_cfg["data_dir"], feature_vocab,
+    PROCESSED_DIR, feature_vocab,
     batch_size=data_cfg["batch_size"],
     max_seq_len=max_seq_len,
     num_workers=data_cfg["num_workers"],
 )
 
-# Build model
+# Model
 feature_config = get_feature_config(feature_vocab, emb_dim=model_cfg["embedding_dim"], max_seq_len=max_seq_len)
 model_cfg["din_pairs"] = [tuple(p) for p in model_cfg.get("din_pairs", [])]
 model = DIN_DCN(feature_config, model_cfg)
-num_params = sum(p.numel() for p in model.parameters())
-print(f"  Model parameters: {num_params:,}")
+print(f"  Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # Train
 trainer = Trainer(model, device=device, config=train_cfg)
@@ -252,9 +159,9 @@ result = trainer.fit(
     patience=train_cfg["early_stopping_patience"],
 )
 
-# ─── Step 5: Test ───
+# ─── Step 4: Test ───
 print("\n" + "=" * 60)
-print("Step 5: Testing ...")
+print("Step 4: Test Results")
 print("=" * 60)
 
 if "test" in loaders:
@@ -262,12 +169,13 @@ if "test" in loaders:
     print(f"  Test AUC:     {test_metrics['auc']:.4f}")
     print(f"  Test LogLoss: {test_metrics['logloss']:.4f}")
 
-print("\n" + "=" * 60)
-print(f"Training complete! Best valid AUC = {result['best_auc']:.4f} at epoch {result['best_epoch']}")
-print("=" * 60)
+print(f"\n  Best valid AUC = {result['best_auc']:.4f} at epoch {result['best_epoch']}")
 
-# Save model to Kaggle output
-import shutil
+# Save model
 if os.path.exists("checkpoints/best_model.pt"):
     shutil.copy("checkpoints/best_model.pt", "/kaggle/working/best_model.pt")
     print("  Model saved to /kaggle/working/best_model.pt")
+
+print("\n" + "=" * 60)
+print("Done!")
+print("=" * 60)
