@@ -1,19 +1,22 @@
 """
-Taobao Ad Dataset Preprocessing Script (Fast version).
+Taobao Ad Dataset Preprocessing Script (DuckDB version).
+
+Uses DuckDB for behavior_log processing — disk-spill-capable,
+handles 700M+ rows within Kaggle's 13GB RAM.
 
 Usage:
     # 快速跑通 (1000 用户, 100万行行为日志)
     python3 scripts/preprocess_taobao.py --sample_users 1000 --max_behavior_rows 1000000
 
-    # 正式预处理
-    python3 scripts/preprocess_taobao.py --sample_users 100000
+    # 全量预处理 (Kaggle 上跑)
+    python3 scripts/preprocess_taobao.py --sample_users 0
 """
 import os
 import sys
 import json
 import logging
 import argparse
-from collections import Counter, OrderedDict
+from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -69,72 +72,131 @@ def load_raw_tables(sample_users=0):
     return raw_sample, ad_feature, user_profile
 
 
-def load_behavior_and_build_sequences(user_set, max_rows=0, max_len=50, chunksize=2_000_000):
+def build_sequences_duckdb(user_ids, max_rows=0, max_len=50):
     """
-    Stream behavior_log.csv in chunks; build per-user sequences incrementally.
-    Never holds the full behavior log in memory.
+    Use DuckDB to build behavior sequences. Disk-spill capable,
+    handles 700M+ rows without OOM.
 
-    Returns: DataFrame with columns [userid, cate_seq, brand_seq]
+    Returns: pd.DataFrame with columns [userid, cate_seq, brand_seq]
+    """
+    import duckdb
+
+    behavior_path = os.path.join(RAW_DIR, "behavior_log.csv")
+    logger.info(f"Building behavior sequences with DuckDB (max_len={max_len}) ...")
+
+    con = duckdb.connect()
+
+    # Configure DuckDB for memory-constrained environment
+    # Use temp directory for spilling
+    tmp_dir = os.path.join(OUT_DIR, "_duckdb_tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    con.execute(f"PRAGMA temp_directory='{tmp_dir}'")
+    con.execute("PRAGMA memory_limit='8GB'")
+    con.execute("PRAGMA threads=4")
+
+    # Register user_ids as a table for filtering
+    user_df = pd.DataFrame({"userid": list(user_ids)})
+    con.register("user_filter", user_df)
+
+    # Build the query
+    row_limit = f"LIMIT {max_rows}" if max_rows > 0 else ""
+
+    query = f"""
+    WITH behavior AS (
+        SELECT
+            "user" AS userid,
+            time_stamp,
+            CAST(cate AS VARCHAR) AS cate,
+            CAST(brand AS VARCHAR) AS brand
+        FROM read_csv_auto('{behavior_path}')
+        {row_limit}
+    ),
+    matched AS (
+        SELECT
+            b.userid,
+            b.time_stamp,
+            b.cate,
+            b.brand,
+            ROW_NUMBER() OVER (
+                PARTITION BY b.userid
+                ORDER BY b.time_stamp DESC
+            ) AS rn
+        FROM behavior b
+        INNER JOIN user_filter u ON b.userid = u.userid
+    ),
+    recent AS (
+        SELECT userid, time_stamp, cate, brand
+        FROM matched
+        WHERE rn <= {max_len}
+    )
+    SELECT
+        userid,
+        string_agg(cate, '^' ORDER BY time_stamp) AS cate_seq,
+        string_agg(brand, '^' ORDER BY time_stamp) AS brand_seq
+    FROM recent
+    GROUP BY userid
+    """
+
+    logger.info("  Executing DuckDB query (this may take 10-30 min for full data) ...")
+    seq_df = con.execute(query).fetchdf()
+
+    con.close()
+
+    # Cleanup temp dir
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    logger.info(f"  Built sequences for {len(seq_df):,} users")
+    return seq_df
+
+
+def build_sequences_pandas(user_set, max_rows=0, max_len=50, chunksize=2_000_000):
+    """
+    Fallback: pandas chunked processing for small datasets.
+    Only safe when user_set is small (< 100K users).
     """
     behavior_path = os.path.join(RAW_DIR, "behavior_log.csv")
-    logger.info(f"Loading behavior_log.csv (max_rows={max_rows or 'ALL'}) + building sequences ...")
+    logger.info(f"Loading behavior_log.csv with pandas (max_rows={max_rows or 'ALL'}) ...")
 
-    # Dict to accumulate per-user sequences: {user_id: [(time_stamp, cate, brand), ...]}
-    user_sequences = {}
+    chunks = []
     total_read = 0
-    total_kept = 0
 
     reader = pd.read_csv(behavior_path, chunksize=chunksize)
     for i, chunk in enumerate(reader):
         total_read += len(chunk)
-
-        # Vectorized filter — only keep users in user_set
         filtered = chunk[chunk["user"].isin(user_set)][["user", "time_stamp", "cate", "brand"]]
-        total_kept += len(filtered)
-
-        # Accumulate into per-user lists (keep only last max_len*2 to bound memory)
-        for user_id, time_stamp, cate, brand in zip(
-            filtered["user"].values,
-            filtered["time_stamp"].values,
-            filtered["cate"].values,
-            filtered["brand"].values,
-        ):
-            if user_id not in user_sequences:
-                user_sequences[user_id] = []
-            user_sequences[user_id].append((time_stamp, str(cate), str(brand)))
-
-            # Periodic trim to prevent unbounded growth
-            if len(user_sequences[user_id]) > max_len * 4:
-                user_sequences[user_id].sort(key=lambda x: x[0])
-                user_sequences[user_id] = user_sequences[user_id][-max_len:]
+        if len(filtered) > 0:
+            chunks.append(filtered)
 
         if (i + 1) % 5 == 0:
-            logger.info(f"  ... read {total_read:,} rows, kept {total_kept:,}, users_with_seq={len(user_sequences):,}")
+            kept = sum(len(c) for c in chunks)
+            logger.info(f"  ... read {total_read:,} rows, kept {kept:,}")
 
         if max_rows > 0 and total_read >= max_rows:
-            logger.info(f"  Reached max_rows={max_rows:,}, stopping.")
             break
 
-    logger.info(f"  Done: {total_read:,} rows read, {total_kept:,} kept, {len(user_sequences):,} users with sequences")
-
-    # Build final sequences
-    logger.info(f"Building final sequences (max_len={max_len}) ...")
-    records = []
-    for user_id, items in user_sequences.items():
-        items.sort(key=lambda x: x[0])
-        recent = items[-max_len:]
-        cate_seq = "^".join(x[1] for x in recent)
-        brand_seq = "^".join(x[2] for x in recent)
-        records.append({"userid": user_id, "cate_seq": cate_seq, "brand_seq": brand_seq})
-
-    # Free memory
-    del user_sequences
-
-    if not records:
-        logger.warning("  No behavior data found for selected users!")
+    if not chunks:
         return pd.DataFrame(columns=["userid", "cate_seq", "brand_seq"])
 
-    seq_df = pd.DataFrame(records)
+    behavior_df = pd.concat(chunks, ignore_index=True)
+    logger.info(f"  Done: {total_read:,} rows read, {len(behavior_df):,} kept")
+    del chunks
+
+    # Build sequences
+    logger.info(f"Building sequences (max_len={max_len}) ...")
+    behavior_df = behavior_df.sort_values(["user", "time_stamp"])
+    behavior_df["cate"] = behavior_df["cate"].astype(str)
+    behavior_df["brand"] = behavior_df["brand"].astype(str)
+
+    def agg_seq(group):
+        recent = group.tail(max_len)
+        return pd.Series({
+            "cate_seq": "^".join(recent["cate"].values),
+            "brand_seq": "^".join(recent["brand"].values),
+        })
+
+    seq_df = behavior_df.groupby("user").apply(agg_seq, include_groups=False).reset_index()
+    seq_df.rename(columns={"user": "userid"}, inplace=True)
     logger.info(f"  Built sequences for {len(seq_df):,} users")
     return seq_df
 
@@ -169,6 +231,9 @@ def main():
                         help="Max rows to read from behavior_log. 0=ALL")
     parser.add_argument("--max_seq_len", type=int, default=MAX_SEQ_LEN)
     parser.add_argument("--min_freq", type=int, default=MIN_FREQ)
+    parser.add_argument("--backend", type=str, default="auto",
+                        choices=["auto", "duckdb", "pandas"],
+                        help="Backend for behavior_log processing")
     args = parser.parse_args()
 
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -182,15 +247,37 @@ def main():
     df = df.merge(user_profile, on="userid", how="left")
     logger.info(f"  Joined: {len(df):,} rows, {len(df.columns)} cols")
 
-    # ─── Step 3: Load behavior log + build sequences (streaming) ───
+    # ─── Step 3: Build behavior sequences ───
     user_set = set(df["userid"].unique())
-    seq_df = load_behavior_and_build_sequences(
-        user_set, max_rows=args.max_behavior_rows, max_len=args.max_seq_len
-    )
+    num_users = len(user_set)
+    logger.info(f"  Users to process: {num_users:,}")
+
+    # Choose backend
+    backend = args.backend
+    if backend == "auto":
+        try:
+            import duckdb
+            backend = "duckdb"
+            logger.info("  Backend: DuckDB (auto-detected)")
+        except ImportError:
+            backend = "pandas"
+            logger.info("  Backend: pandas (DuckDB not available)")
+
+    if backend == "duckdb":
+        seq_df = build_sequences_duckdb(
+            user_set, max_rows=args.max_behavior_rows, max_len=args.max_seq_len
+        )
+    else:
+        if num_users > 100_000 and args.max_behavior_rows == 0:
+            logger.warning("  ⚠️ pandas backend with >100K users and no row limit may OOM!")
+            logger.warning("  Consider: pip install duckdb, or --sample_users 100000")
+        seq_df = build_sequences_pandas(
+            user_set, max_rows=args.max_behavior_rows, max_len=args.max_seq_len
+        )
 
     if len(seq_df) > 0:
         df = df.merge(seq_df, on="userid", how="left")
-        del seq_df  # free memory
+        del seq_df
     else:
         df["cate_seq"] = ""
         df["brand_seq"] = ""

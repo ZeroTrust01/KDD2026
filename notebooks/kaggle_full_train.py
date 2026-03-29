@@ -94,8 +94,18 @@ if not all_found:
 # ─── Step 2: Preprocess (FULL data) ───
 print("\n" + "=" * 60)
 print("Step 2: Preprocessing FULL dataset ...")
-print("  This may take 30-60 minutes for behavior_log (22GB)")
+print("  Using DuckDB for memory-efficient behavior_log processing")
 print("=" * 60)
+
+# Install DuckDB if not available
+try:
+    import duckdb
+    print(f"  DuckDB {duckdb.__version__} available")
+except ImportError:
+    print("  Installing DuckDB ...")
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "duckdb"], check=True)
+    import duckdb
+    print(f"  DuckDB {duckdb.__version__} installed")
 
 PROCESSED_DIR = "data/TaobaoAd/processed"
 VOCAB_PATH = os.path.join(PROCESSED_DIR, "feature_vocab.json")
