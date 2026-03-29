@@ -41,44 +41,34 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 EXPECTED_CSVS = ["raw_sample.csv", "ad_feature.csv", "user_profile.csv", "behavior_log.csv"]
 
-# Find CSV files in Kaggle input (could be extracted from tar.gz by Kaggle)
+# Kaggle extracts tar.gz into nested dirs like: csv_name/csv_name
+# Find actual files (not directories) for each expected CSV
 for csv_name in EXPECTED_CSVS:
     target = os.path.join(DATA_DIR, csv_name)
     if os.path.isfile(target):
-        print(f"  ✓ {csv_name} exists")
+        size = os.path.getsize(target)
+        label = f"{size / 1e6:.0f} MB" if size < 1e9 else f"{size / 1e9:.1f} GB"
+        print(f"  ✓ {csv_name} already exists ({label})")
         continue
 
-    # Search recursively
-    matches = glob.glob(f"{KAGGLE_INPUT}/**/{csv_name}", recursive=True)
-    if matches:
-        src = matches[0]
-        os.symlink(src, target)
-        size = os.path.getsize(src)
-        label = f"{size / 1e6:.0f} MB" if size < 1e9 else f"{size / 1e9:.1f} GB"
-        print(f"  ✓ {csv_name} linked ({label})")
-    else:
-        print(f"  ✗ {csv_name} NOT FOUND")
+    # Remove stale symlink pointing to directory
+    if os.path.islink(target):
+        os.unlink(target)
 
-# If tar.gz files exist, extract them
-import tarfile
-tar_files = glob.glob(f"{KAGGLE_INPUT}/**/*.tar.gz", recursive=True)
-if tar_files:
-    print(f"\n  Found {len(tar_files)} tar.gz files, extracting ...")
-    extract_tmp = "/kaggle/working/_extract_tmp"
-    os.makedirs(extract_tmp, exist_ok=True)
-    for tar_path in tar_files:
-        fname = os.path.basename(tar_path)
-        print(f"    Extracting {fname} ...")
-        with tarfile.open(tar_path, "r:gz") as tar:
-            tar.extractall(path=extract_tmp)
-    # Move extracted CSVs
-    for csv_file in glob.glob(f"{extract_tmp}/**/*.csv", recursive=True):
-        csv_name = os.path.basename(csv_file)
-        target = os.path.join(DATA_DIR, csv_name)
-        if not os.path.isfile(target):
-            shutil.move(csv_file, target)
-            print(f"    ✓ {csv_name} extracted")
-    shutil.rmtree(extract_tmp, ignore_errors=True)
+    # Search for actual FILE (not directory) matching csv_name
+    found = False
+    for root, dirs, files in os.walk(KAGGLE_INPUT):
+        if csv_name in files:
+            src = os.path.join(root, csv_name)
+            if os.path.isfile(src) and not os.path.isdir(src):
+                os.symlink(src, target)
+                size = os.path.getsize(src)
+                label = f"{size / 1e6:.0f} MB" if size < 1e9 else f"{size / 1e9:.1f} GB"
+                print(f"  ✓ {csv_name} linked ({label})")
+                found = True
+                break
+    if not found:
+        print(f"  ✗ {csv_name} NOT FOUND")
 
 # Verify all files present
 print("\nData verification:")
