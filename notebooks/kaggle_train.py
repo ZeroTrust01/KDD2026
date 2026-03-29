@@ -38,53 +38,84 @@ print("\n" + "=" * 60)
 print("Step 1: Locating and extracting data ...")
 print("=" * 60)
 
-# Kaggle datasets are mounted at /kaggle/input/<dataset-name>/
-# Find the data files
 import glob
+import tarfile
+import shutil
 
 KAGGLE_INPUT = "/kaggle/input"
 DATA_DIR = "data/TaobaoAd"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Search for tar.gz files in all kaggle input directories
+EXPECTED_CSVS = ["raw_sample.csv", "ad_feature.csv", "user_profile.csv", "behavior_log.csv"]
+
+# --- Strategy 1: Extract tar.gz files ---
 tar_files = glob.glob(f"{KAGGLE_INPUT}/**/*.tar.gz", recursive=True)
-print(f"Found {len(tar_files)} tar.gz files:")
-for f in tar_files:
-    print(f"  {f} ({os.path.getsize(f) / 1e6:.1f} MB)")
+if tar_files:
+    print(f"Found {len(tar_files)} tar.gz files:")
+    for f in tar_files:
+        size = os.path.getsize(f)
+        print(f"  {f} ({size / 1e6:.1f} MB)" if size < 1e9 else f"  {f} ({size / 1e9:.1f} GB)")
 
-# Extract to data directory
-import tarfile
+    # Extract to a temp dir first, then move CSV files
+    extract_tmp = "data/TaobaoAd/_extract_tmp"
+    os.makedirs(extract_tmp, exist_ok=True)
 
-for tar_path in tar_files:
-    fname = os.path.basename(tar_path)
-    csv_name = fname.replace(".tar.gz", "")
-    target_path = os.path.join(DATA_DIR, csv_name)
+    for tar_path in tar_files:
+        fname = os.path.basename(tar_path)
+        print(f"  Extracting {fname} ...")
+        with tarfile.open(tar_path, "r:gz") as tar:
+            tar.extractall(path=extract_tmp)
 
-    if os.path.exists(target_path):
-        print(f"  ✓ {csv_name} already extracted")
-        continue
+    # Find actual CSV files recursively and move to DATA_DIR
+    for csv_file in glob.glob(f"{extract_tmp}/**/*.csv", recursive=True):
+        csv_name = os.path.basename(csv_file)
+        target = os.path.join(DATA_DIR, csv_name)
+        if not os.path.isfile(target):
+            shutil.move(csv_file, target)
+            print(f"  ✓ Moved {csv_name}")
 
-    print(f"  Extracting {fname} ...")
-    with tarfile.open(tar_path, "r:gz") as tar:
-        tar.extractall(path=DATA_DIR)
-    print(f"  ✓ {csv_name} extracted")
+    # Cleanup temp dir
+    shutil.rmtree(extract_tmp, ignore_errors=True)
 
-# Also check for uncompressed CSV files
-csv_files = glob.glob(f"{KAGGLE_INPUT}/**/*.csv", recursive=True)
-for csv_path in csv_files:
-    fname = os.path.basename(csv_path)
-    target_path = os.path.join(DATA_DIR, fname)
-    if not os.path.exists(target_path):
-        print(f"  Linking {fname} ...")
-        os.symlink(csv_path, target_path)
+# --- Strategy 2: Find CSV files directly in Kaggle input ---
+for csv_path in glob.glob(f"{KAGGLE_INPUT}/**/*.csv", recursive=True):
+    csv_name = os.path.basename(csv_path)
+    target = os.path.join(DATA_DIR, csv_name)
+    if not os.path.isfile(target):
+        os.symlink(csv_path, target)
+        print(f"  ✓ Linked {csv_name}")
 
-# Verify
+# --- Strategy 3: Handle case where extraction created directories ---
+for item in os.listdir(DATA_DIR):
+    item_path = os.path.join(DATA_DIR, item)
+    if os.path.isdir(item_path) and item.endswith(".csv"):
+        # Directory named like "raw_sample.csv/" - search inside for actual CSV
+        for f in glob.glob(f"{item_path}/**/*.csv", recursive=True):
+            real_name = os.path.basename(f)
+            target = os.path.join(DATA_DIR, real_name)
+            if not os.path.isfile(target):
+                shutil.move(f, target)
+                print(f"  ✓ Rescued {real_name} from directory")
+        shutil.rmtree(item_path, ignore_errors=True)
+
+# --- Verify ---
 print("\nData files:")
-for f in sorted(os.listdir(DATA_DIR)):
-    fpath = os.path.join(DATA_DIR, f)
+found = []
+for csv_name in EXPECTED_CSVS:
+    fpath = os.path.join(DATA_DIR, csv_name)
     if os.path.isfile(fpath):
         size = os.path.getsize(fpath)
-        print(f"  {f}: {size / 1e6:.1f} MB" if size < 1e9 else f"  {f}: {size / 1e9:.1f} GB")
+        label = f"{size / 1e6:.1f} MB" if size < 1e9 else f"{size / 1e9:.1f} GB"
+        print(f"  ✓ {csv_name}: {label}")
+        found.append(csv_name)
+    else:
+        print(f"  ✗ {csv_name}: NOT FOUND")
+
+if len(found) < 4:
+    print("\n⚠️  Missing data files! Listing all in Kaggle input:")
+    for f in glob.glob(f"{KAGGLE_INPUT}/**/*", recursive=True):
+        if os.path.isfile(f):
+            print(f"    {f}")
 
 
 # ─── Step 2: Install dependencies ───
