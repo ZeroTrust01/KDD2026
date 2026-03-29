@@ -163,6 +163,13 @@ def build_sequences_pandas(user_set, max_rows=0, max_len=50, chunksize=2_000_000
 
     reader = pd.read_csv(behavior_path, chunksize=chunksize)
     for i, chunk in enumerate(reader):
+        if max_rows > 0:
+            remaining = max_rows - total_read
+            if remaining <= 0:
+                break
+            if len(chunk) > remaining:
+                chunk = chunk.iloc[:remaining].copy()
+
         total_read += len(chunk)
         filtered = chunk[chunk["user"].isin(user_set)][["user", "time_stamp", "cate", "brand"]]
         if len(filtered) > 0:

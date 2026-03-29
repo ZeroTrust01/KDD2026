@@ -116,7 +116,8 @@ else:
     # FULL data: sample_users=0, max_behavior_rows=0
     cmd = [sys.executable, "scripts/preprocess_taobao.py",
            "--sample_users", "0",
-           "--max_behavior_rows", "0"]
+           "--max_behavior_rows", "0",
+           "--backend", "duckdb"]
     print(f"  Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
