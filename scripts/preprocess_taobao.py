@@ -92,7 +92,9 @@ def build_sequences_duckdb(user_ids, max_rows=0, max_len=50):
     os.makedirs(tmp_dir, exist_ok=True)
     con.execute(f"PRAGMA temp_directory='{tmp_dir}'")
     con.execute("PRAGMA memory_limit='8GB'")
-    con.execute("PRAGMA threads=4")
+    con.execute("PRAGMA threads=2")
+    if max_rows == 0:
+        con.execute("SET preserve_insertion_order=false")
 
     # Register user_ids as a table for filtering
     user_df = pd.DataFrame({"userid": list(user_ids)})
@@ -116,25 +118,28 @@ def build_sequences_duckdb(user_ids, max_rows=0, max_len=50):
             b.userid,
             b.time_stamp,
             b.cate,
-            b.brand,
-            ROW_NUMBER() OVER (
-                PARTITION BY b.userid
-                ORDER BY b.time_stamp DESC
-            ) AS rn
+            b.brand
         FROM behavior b
         INNER JOIN user_filter u ON b.userid = u.userid
     ),
     recent AS (
-        SELECT userid, time_stamp, cate, brand
+        SELECT
+            userid,
+            list_reverse(
+                arg_max(
+                    struct_pack(cate := cate, brand := brand, time_stamp := time_stamp),
+                    time_stamp,
+                    {max_len}
+                )
+            ) AS items
         FROM matched
-        WHERE rn <= {max_len}
+        GROUP BY userid
     )
     SELECT
         userid,
-        string_agg(cate, '^' ORDER BY time_stamp) AS cate_seq,
-        string_agg(brand, '^' ORDER BY time_stamp) AS brand_seq
+        array_to_string(list_transform(items, x -> x.cate), '^') AS cate_seq,
+        array_to_string(list_transform(items, x -> x.brand), '^') AS brand_seq
     FROM recent
-    GROUP BY userid
     """
 
     logger.info("  Executing DuckDB query (this may take 10-30 min for full data) ...")
