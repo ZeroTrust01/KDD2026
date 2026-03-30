@@ -13,6 +13,7 @@ import os
 import sys
 import subprocess
 import shutil
+from pathlib import Path
 
 # ─── Step 0: Clone code ───
 print("=" * 60)
@@ -26,46 +27,62 @@ if not os.path.exists("/kaggle/working/KDD2026"):
 os.chdir("/kaggle/working/KDD2026")
 sys.path.insert(0, "/kaggle/working/KDD2026")
 
-# ─── Step 1: Link preprocessed data ───
+# ─── Step 1: Locate preprocessed data ───
 print("\n" + "=" * 60)
-print("Step 1: Linking preprocessed data ...")
+print("Step 1: Locating preprocessed data ...")
 print("=" * 60)
 
-import glob
-
 KAGGLE_INPUT = "/kaggle/input"
-PROCESSED_DIR = "data/TaobaoAd/processed"
-os.makedirs(PROCESSED_DIR, exist_ok=True)
-
-# Find and link preprocessed files
 EXPECTED_FILES = ["train.parquet", "valid.parquet", "test.parquet", "feature_vocab.json"]
-found_count = 0
+PREFERRED_DATASET = os.environ.get("KAGGLE_PROCESSED_DATASET", "").strip()
 
-for fname in EXPECTED_FILES:
-    target = os.path.join(PROCESSED_DIR, fname)
-    if os.path.exists(target):
-        print(f"  ✓ {fname} already exists")
-        found_count += 1
-        continue
 
-    # Search in all Kaggle input directories
-    matches = glob.glob(f"{KAGGLE_INPUT}/**/{fname}", recursive=True)
-    if matches:
-        src = matches[0]
-        shutil.copy(src, target)  # copy instead of symlink for reliability
-        print(f"  ✓ {fname} copied from {src}")
-        found_count += 1
-    else:
-        print(f"  ✗ {fname} NOT FOUND")
+def _has_expected_files(base_dir):
+    return all((Path(base_dir) / fname).exists() for fname in EXPECTED_FILES)
 
-if found_count < 4:
+
+def _find_processed_dir():
+    if PREFERRED_DATASET:
+        candidate = Path(KAGGLE_INPUT) / PREFERRED_DATASET
+        if _has_expected_files(candidate):
+            return candidate
+        raise FileNotFoundError(
+            f"KAGGLE_PROCESSED_DATASET={PREFERRED_DATASET!r} 不存在或缺少预处理文件"
+        )
+
+    kaggle_input = Path(KAGGLE_INPUT)
+    direct_matches = [p for p in kaggle_input.iterdir() if p.is_dir() and _has_expected_files(p)]
+    if direct_matches:
+        return sorted(direct_matches)[0]
+
+    recursive_matches = []
+    for vocab_path in kaggle_input.rglob("feature_vocab.json"):
+        candidate = vocab_path.parent
+        if _has_expected_files(candidate):
+            recursive_matches.append(candidate)
+    if recursive_matches:
+        return sorted(recursive_matches)[0]
+    return None
+
+
+processed_root = _find_processed_dir()
+if processed_root is None:
     print("\n⚠️  Missing files! Available in Kaggle input:")
-    for f in glob.glob(f"{KAGGLE_INPUT}/**/*", recursive=True):
-        if os.path.isfile(f):
-            print(f"    {f}")
-    raise FileNotFoundError("Missing preprocessed data files. Did you add the dataset?")
+    for path in sorted(Path(KAGGLE_INPUT).rglob("*")):
+        if path.is_file():
+            print(f"    {path}")
+    raise FileNotFoundError("Missing preprocessed data files. Did you add the processed dataset?")
 
-print(f"\n  All {found_count} files ready!")
+PROCESSED_DIR = str(processed_root)
+print(f"  Using processed dataset: {PROCESSED_DIR}")
+for fname in EXPECTED_FILES:
+    src = processed_root / fname
+    if src.is_dir():
+        part_count = sum(1 for _ in src.rglob("*.parquet"))
+        print(f"  ✓ {fname} dataset found ({part_count} parquet parts)")
+    else:
+        size_mb = src.stat().st_size / 1e6
+        print(f"  ✓ {fname} found ({size_mb:.1f} MB)")
 
 # ─── Step 2: Check dependencies ───
 print("\n" + "=" * 60)
@@ -134,6 +151,7 @@ with open(VOCAB_PATH) as f:
     feature_vocab = json.load(f)
 
 print(f"  Vocab features: {len(feature_vocab)}")
+print("  Training will read parquet directly from /kaggle/input without copying.")
 
 # DataLoaders
 max_seq_len = data_cfg.get("max_seq_len", 50)

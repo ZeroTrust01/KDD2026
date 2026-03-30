@@ -1,15 +1,16 @@
 """
 KDD Cup 2026 - Full Data Preprocessing on Kaggle
 =================================================
-在 Kaggle 上对全量淘宝广告数据进行预处理。
+在 Kaggle 上对全量淘宝广告数据进行预处理并导出 processed dataset。
 
 前置步骤:
 1. 创建 Kaggle Notebook, 选 GPU T4 x2, Internet ON
 2. Add data: 添加 "taobao-ad-display-click" (23GB 原始数据)
 3. 运行本脚本, 处理完成后点 "Save Version" 保存输出
-4. 用输出数据创建新 Dataset, 用于后续训练
+4. 用 /kaggle/working/processed 创建新 Dataset
+5. 后续训练请使用 notebooks/kaggle_train.py
 
-预计耗时: 预处理 30-60 分钟, 训练 5-10 分钟
+预计耗时: 预处理 30-60 分钟
 """
 
 import os
@@ -155,87 +156,7 @@ for fname in ["train.parquet", "valid.parquet", "test.parquet", "feature_vocab.j
             print(f"  Copied {fname} to output ({size / 1e6:.1f} MB)")
 
 
-# ─── Step 3: Train ───
 print("\n" + "=" * 60)
-print("Step 3: Training DIN + DCN V2 on FULL data ...")
-print("=" * 60)
-
-import torch
-import yaml
-import numpy as np
-import random
-import logging
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S")
-logger = logging.getLogger(__name__)
-
-from src.data.dataset import create_dataloaders, get_feature_config
-from src.models.baselines.din_dcn import DIN_DCN
-from src.training.trainer import Trainer
-
-SEED = 42
-random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-print(f"  Device: {device}")
-
-with open("configs/baseline.yaml") as f:
-    config = yaml.safe_load(f)
-
-# Full data config
-config["data"]["num_workers"] = 2
-config["data"]["batch_size"] = 4096      # larger batch for full data
-config["training"]["epochs"] = 20
-config["training"]["early_stopping_patience"] = 5
-config["training"]["learning_rate"] = 5e-4   # slightly smaller LR for full data
-config["model"]["dnn_dropout"] = 0.2         # more regularization
-
-data_cfg = config["data"]
-model_cfg = config["model"]
-train_cfg = config["training"]
-
-with open(VOCAB_PATH) as f:
-    feature_vocab = json.load(f)
-
-max_seq_len = data_cfg.get("max_seq_len", 50)
-loaders = create_dataloaders(
-    PROCESSED_DIR, feature_vocab,
-    batch_size=data_cfg["batch_size"],
-    max_seq_len=max_seq_len,
-    num_workers=data_cfg["num_workers"],
-)
-
-feature_config = get_feature_config(feature_vocab, emb_dim=model_cfg["embedding_dim"], max_seq_len=max_seq_len)
-model_cfg["din_pairs"] = [tuple(p) for p in model_cfg.get("din_pairs", [])]
-model = DIN_DCN(feature_config, model_cfg)
-print(f"  Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-trainer = Trainer(model, device=device, config=train_cfg)
-result = trainer.fit(
-    train_loader=loaders["train"],
-    valid_loader=loaders.get("valid"),
-    epochs=train_cfg["epochs"],
-    patience=train_cfg["early_stopping_patience"],
-)
-
-# ─── Step 4: Test ───
-print("\n" + "=" * 60)
-print("Step 4: Test Results")
-print("=" * 60)
-
-if "test" in loaders:
-    test_metrics = trainer.evaluate(loaders["test"])
-    print(f"  Test AUC:     {test_metrics['auc']:.4f}")
-    print(f"  Test LogLoss: {test_metrics['logloss']:.4f}")
-
-print(f"\n  Best valid AUC = {result['best_auc']:.4f} at epoch {result['best_epoch']}")
-
-if os.path.exists("checkpoints/best_model.pt"):
-    shutil.copy("checkpoints/best_model.pt", "/kaggle/working/best_model.pt")
-    print("  Model saved to /kaggle/working/best_model.pt")
-
-print("\n" + "=" * 60)
-print("Done! 保存此 Notebook 的输出, 可从 /kaggle/working/processed/ 获取处理好的数据")
+print("Done! 处理好的数据位于 /kaggle/working/processed/")
+print("下一步: 用该输出创建 Kaggle Dataset, 然后运行 notebooks/kaggle_train.py")
 print("=" * 60)
