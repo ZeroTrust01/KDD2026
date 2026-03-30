@@ -35,6 +35,10 @@ print("=" * 60)
 KAGGLE_INPUT = "/kaggle/input"
 EXPECTED_FILES = ["train.parquet", "valid.parquet", "test.parquet", "feature_vocab.json"]
 PREFERRED_DATASET = os.environ.get("KAGGLE_PROCESSED_DATASET", "").strip()
+EXPERIMENT_BATCH_SIZE = int(os.environ.get("KAGGLE_BATCH_SIZE", "2048"))
+EXPERIMENT_LR = float(os.environ.get("KAGGLE_LR", "3e-4"))
+EXPERIMENT_EPOCHS = int(os.environ.get("KAGGLE_EPOCHS", "8"))
+EXPERIMENT_PATIENCE = int(os.environ.get("KAGGLE_PATIENCE", "4"))
 
 
 def _has_expected_files(base_dir):
@@ -137,9 +141,10 @@ with open("configs/baseline.yaml") as f:
 
 # Kaggle overrides
 config["data"]["num_workers"] = 2
-config["data"]["batch_size"] = 2048
-config["training"]["epochs"] = 15
-config["training"]["early_stopping_patience"] = 4
+config["data"]["batch_size"] = EXPERIMENT_BATCH_SIZE
+config["training"]["learning_rate"] = EXPERIMENT_LR
+config["training"]["epochs"] = EXPERIMENT_EPOCHS
+config["training"]["early_stopping_patience"] = EXPERIMENT_PATIENCE
 
 data_cfg = config["data"]
 model_cfg = config["model"]
@@ -152,6 +157,13 @@ with open(VOCAB_PATH) as f:
 
 print(f"  Vocab features: {len(feature_vocab)}")
 print("  Training will read parquet directly from /kaggle/input without copying.")
+print(
+    "  Experiment config: "
+    f"batch_size={data_cfg['batch_size']}, "
+    f"lr={train_cfg['learning_rate']:.1e}, "
+    f"epochs={train_cfg['epochs']}, "
+    f"patience={train_cfg['early_stopping_patience']}"
+)
 
 # DataLoaders
 max_seq_len = data_cfg.get("max_seq_len", 50)
